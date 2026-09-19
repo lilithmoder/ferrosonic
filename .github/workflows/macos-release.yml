@@ -1,13 +1,14 @@
 name: macos-release
 
 # Builds downloadable macOS binaries without tying up the local Mac.
-# Runs automatically on every push to main or macos-port and can also be
-# triggered manually from the Actions tab (the file lives on the default
-# branch). The heavy Linux test suite lives in test.yml; this workflow adds a
-# lib-only test job so the macOS cfg paths get executed somewhere.
+# Runs automatically on every push to main and can also be triggered manually
+# from the Actions tab (the file lives on the default branch). macos-port is a
+# mirror of main, so it no longer triggers its own duplicate run. The heavy
+# Linux test suite lives in test.yml; this workflow adds a lib-only test job so
+# the macOS cfg paths get executed somewhere.
 on:
   push:
-    branches: [main, macos-port]
+    branches: [main]
   workflow_dispatch:
     inputs:
       profile:
@@ -84,6 +85,7 @@ jobs:
           name: ${{ matrix.artifact }}
           path: stage/
           if-no-files-found: error
+          retention-days: 14
 
   # Lib unit tests on Apple Silicon. Integration tests (~151 binaries) are too
   # slow for the macOS runners; the Linux gate in test.yml covers those. This

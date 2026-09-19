@@ -67,3 +67,4 @@ jobs:
           name: ferrosonic-linux-x86_64
           path: stage/
           if-no-files-found: error
+          retention-days: 14

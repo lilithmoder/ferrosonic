@@ -1,12 +1,13 @@
 name: test
 
-# Gates run on every push to master, main, and macos-port, and on PRs.
-# master mirrors the upstream project; main/macos-port are the personal-fork
-# line. Mutation testing is a local discovery tool (cargo mutants --file
-# <path>), not a CI gate. The release workflow still fires on tag push.
+# Gates run on every push to master and main, and on PRs. master mirrors the
+# upstream project; main is the personal-fork line and macos-port is a mirror
+# of it, so macos-port no longer triggers a duplicate run. Mutation testing is
+# a local discovery tool (cargo mutants --file <path>), not a CI gate. The
+# release workflow still fires on tag push.
 on:
   push:
-    branches: [master, main, macos-port]
+    branches: [master, main]
   pull_request:
   workflow_dispatch:
 
