@@ -1,0 +1,69 @@
+name: linux-release
+
+# Linux counterpart to macos-release: builds a downloadable x86_64 binary on
+# every push to main (and on manual dispatch), so local Linux machines do not
+# need to run the LTO-heavy release build themselves. Uses the same
+# release-fast profile. The tagged-distribution musl static build remains in
+# release.yml; the gating test suite lives in test.yml.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Build profile (release-fast is much quicker, release is full LTO)
+        required: false
+        default: release-fast
+        type: choice
+        options:
+          - release-fast
+          - release
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Cancel a superseded dispatch on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: artifact (x86_64-unknown-linux-gnu, ${{ inputs.profile || 'release-fast' }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-x86_64
+          # Release-profile artifacts are large; keep the cache under the
+          # 10 GB GitHub limit by dropping debug info from cached builds.
+          env-vars: |
+            CARGO_PROFILE_RELEASE_DEBUG=0
+            CARGO_PROFILE_RELEASE_FAST_DEBUG=0
+      # The release build itself is pure Rust (rustls, zbus), but install the
+      # same system deps the test workflow uses so any build-script probing
+      # behaves consistently.
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+      # Only the app binary is needed; test/dev-dependencies stay out of the
+      # build.
+      - name: Build
+        run: cargo build --locked --profile "${{ inputs.profile || 'release-fast' }}" --bin ferrosonic
+      - name: Stage artifact
+        run: |
+          prof="${{ inputs.profile || 'release-fast' }}"
+          mkdir -p stage
+          cp "target/${prof}/ferrosonic" "stage/ferrosonic-linux-x86_64"
+          # Bare filename so `sha256sum -c` works from inside the download.
+          (cd stage && sha256sum ferrosonic-linux-x86_64 > ferrosonic-linux-x86_64.sha256)
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ferrosonic-linux-x86_64
+          path: stage/
+          if-no-files-found: error

@@ -110,13 +110,15 @@
 
 ### Added
 
-- **macOS release artifact workflow.** A manual `macos-release` GitHub Actions
-  workflow builds a downloadable `x86_64-apple-darwin` binary with dependency
-  caching, so the Mac itself does not need to compile the project. A new
-  `release-fast` cargo profile (thin LTO, 16 codegen units) provides optimized
-  builds at a fraction of the full-LTO compile time; the canonical `release`
-  profile is unchanged. `docs/MACOS-PORT.md` documents the fast-build workflow
-  and the local iteration path.
+- **macOS and Linux release artifact workflows.** Manual/push-triggered
+  `macos-release` and `linux-release` GitHub Actions workflows build
+  downloadable `x86_64-apple-darwin` and `x86_64-unknown-linux-gnu` binaries
+  with dependency caching, so neither the Mac nor the Linux machine needs to
+  compile the project locally. A new `release-fast` cargo profile (thin LTO,
+  16 codegen units) provides optimized builds at a fraction of the full-LTO
+  compile time; the canonical `release` profile is unchanged, and the tagged
+  musl static release build is untouched. `docs/MACOS-PORT.md` documents the
+  fast-build workflow and the local iteration path.
 - **Stream on start.** Starting a cold queue (picking an album/artist/song,
   shuffling the library, or auto-continue) now streams the track from the
   server and begins playback as soon as mpv has enough data, instead of
