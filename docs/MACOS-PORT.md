@@ -48,9 +48,11 @@ is what made the first port attempt unbearably slow. Two faster paths:
 
 ### A. Download a prebuilt artifact (no local build)
 
-1. Fork the repo to your GitHub account and push `macos-port`.
-2. Actions tab → **macos-release** → **Run workflow** (profile `release-fast`).
-3. Download `ferrosonic-macos-x86_64` from the finished run, then:
+1. Push to `main` or `macos-port` on the fork
+   (`https://github.com/lilithmoder/ferrosonic`) — every push builds a fresh
+   artifact automatically.
+2. Open the finished run under the Actions tab → **macos-release**, download
+   `ferrosonic-macos-x86_64`, then:
    ```bash
    shasum -a 256 -c ferrosonic-macos-x86_64.sha256
    chmod +x ferrosonic-macos-x86_64
@@ -115,12 +117,22 @@ observed output, code fixes (file:line), and any remaining failures.
 
 ## Transfer
 
-The branch is `macos-port`, pushed to the fork at
-`https://github.com/lilithmoder/ferrosonic`. On the Mac:
+All work — the personal features, the macOS port, and the fast-build tooling —
+lives on the fork at `https://github.com/lilithmoder/ferrosonic`:
+
+- `main` (default branch): the primary development line. Future features land
+  here, so they are never left out of the macOS build.
+- `macos-port`: branch for Mac-side porting and verification work. Merge
+  `main` into it (or fast-forward it) to pick up new features; the
+  `macos-release` workflow builds artifacts on pushes to either branch.
+- `master`: untouched mirror of the upstream project, used for pulling
+  upstream updates.
+
+On the Mac:
 
 ```bash
-git remote add fork https://github.com/lilithmoder/ferrosonic.git
-git fetch fork macos-port && git checkout macos-port && git pull fork macos-port
+git clone https://github.com/lilithmoder/ferrosonic.git   # lands on main
+cd ferrosonic
 ```
 
 (The changes were previously moved as `ferrosonic-macos-port.bundle`; the fork
