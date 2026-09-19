@@ -119,6 +119,11 @@
   compile time; the canonical `release` profile is unchanged, and the tagged
   musl static release build is untouched. `docs/MACOS-PORT.md` documents the
   fast-build workflow and the local iteration path.
+- **Full test gate on the personal-fork line.** The `test` workflow
+  (rustfmt, clippy, nextest, doc tests) now also runs on every push to
+  `main` and `macos-port`, not just `master`/PRs. The redundant report-only
+  `build_macos` matrix was folded into `macos-release`, which gained a
+  lib+bins clippy pass for the macOS target that the Linux gate cannot see.
 - **Stream on start.** Starting a cold queue (picking an album/artist/song,
   shuffling the library, or auto-continue) now streams the track from the
   server and begins playback as soon as mpv has enough data, instead of

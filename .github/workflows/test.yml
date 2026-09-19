@@ -1,11 +1,12 @@
 name: test
 
-# Gates run on every push to master and on PRs. Mutation testing is a local
-# discovery tool (cargo mutants --file <path>), not a CI gate. The release
-# workflow still fires on tag push.
+# Gates run on every push to master, main, and macos-port, and on PRs.
+# master mirrors the upstream project; main/macos-port are the personal-fork
+# line. Mutation testing is a local discovery tool (cargo mutants --file
+# <path>), not a CI gate. The release workflow still fires on tag push.
 on:
   push:
-    branches: [master]
+    branches: [master, main, macos-port]
   pull_request:
   workflow_dispatch:
 
@@ -110,36 +111,11 @@ jobs:
       - name: Doc tests (nextest skips these)
         run: cargo test --doc --locked
 
-  build_macos:
-    name: build (macOS ${{ matrix.label }})
-    # Report-only while the macOS port is validated end to end. The Linux
-    # jobs remain the gate. Flip `continue-on-error` off once both macOS
-    # targets build and clippy cleanly on a regular basis.
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # x86_64 (Intel). macos-15-intel is GitHub's last Intel image
-          # (supported until Fall 2027); macos-13 is retired.
-          - label: macos-15-intel
-            target: x86_64-apple-darwin
-          # arm64 (Apple Silicon).
-          - label: macos-15
-            target: aarch64-apple-darwin
-    runs-on: ${{ matrix.label }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-      # No C build deps: rustls, pure-Rust zbus, runtime-dlopen chafa,
-      # platform keychain. mpv/cava are runtime-only.
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features --locked --target ${{ matrix.target }}
+  # macOS build/clippy coverage lives in macos-release.yml, which builds the
+  # app for x86_64-apple-darwin and runs a lib+bins clippy pass on every push
+  # to main/macos-port with caching. The previous report-only build_macos
+  # matrix here duplicated that build with a much heavier --all-targets
+  # clippy on the same Intel runners, so it was folded away.
 
   coverage:
     name: coverage (report only)

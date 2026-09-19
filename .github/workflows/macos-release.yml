@@ -55,6 +55,12 @@ jobs:
           cargo build --locked --target x86_64-apple-darwin \
             --profile "${{ inputs.profile || 'release-fast' }}" \
             --bin ferrosonic
+      # Lint the production code for the macOS target on every push; the
+      # Linux clippy gate in test.yml cannot see the
+      # #[cfg(target_os = "macos")] modules. lib+bins only: --all-targets
+      # would compile ~151 test binaries on the 3-core runner.
+      - name: Clippy (macOS cfg coverage)
+        run: cargo clippy --lib --bins --locked --target x86_64-apple-darwin
       - name: Stage artifact
         run: |
           prof="${{ inputs.profile || 'release-fast' }}"

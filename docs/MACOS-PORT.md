@@ -113,7 +113,11 @@ observed output, code fixes (file:line), and any remaining failures.
 2. **Notification cover art.** `osascript` cannot attach an image. If cover art
    in notifications matters, the fallback is the Homebrew `terminal-notifier`
    binary (`-contentImage`), used only when present.
-3. **Flip the macOS CI job to gating** once the build is reliably green.
+3. **Gate the macOS build.** The old report-only `build_macos` matrix in
+   `test.yml` was folded into the `macos-release` workflow, which now builds
+   the macOS binary and runs a lib+bins clippy pass on every push to
+   `main`/`macos-port`. To make that block instead of just report, have the
+   clippy step use `-D warnings` once the port is verified on hardware.
 
 ## Transfer
 
