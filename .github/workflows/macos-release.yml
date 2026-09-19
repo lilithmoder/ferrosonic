@@ -61,7 +61,8 @@ jobs:
           prof="${{ inputs.profile || 'release-fast' }}"
           mkdir -p stage
           cp "target/x86_64-apple-darwin/${prof}/ferrosonic" "stage/ferrosonic-macos-x86_64"
-          shasum -a 256 "stage/ferrosonic-macos-x86_64" > "stage/ferrosonic-macos-x86_64.sha256"
+          # Bare filename so `shasum -a 256 -c` works from inside the download.
+          (cd stage && shasum -a 256 ferrosonic-macos-x86_64 > ferrosonic-macos-x86_64.sha256)
       - uses: actions/upload-artifact@v7
         with:
           name: ferrosonic-macos-x86_64
