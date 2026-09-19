@@ -91,16 +91,21 @@ sudo cp target/release/ferrosonic /usr/local/bin/
 
 ### macOS
 
-There is no prebuilt macOS binary and `install.sh` is Linux-only, so build from
-source. Homebrew supplies the runtime pieces:
+`install.sh` is Linux-only. Two ways to get a binary on macOS:
+
+- **Download a CI artifact** (recommended): every push to `main`/`macos-port`
+  builds a `ferrosonic-macos-x86_64` binary plus SHA-256 under the Actions
+  tab (`macos-release` workflow). See `docs/MACOS-PORT.md` for the workflow,
+  the fast local build loop, and macOS caveats.
+- **Build from source.** Homebrew supplies the runtime pieces:
 
 ```bash
 xcode-select --install                       # Command Line Tools
 brew install mpv                             # required playback engine
 brew install cava chafa                      # optional: visualizer / better half-blocks
 brew install dbus                            # optional: only if you want MPRIS
-cargo build --release
-./target/release/ferrosonic                  # add --standalone to skip the daemon
+cargo build --profile release-fast --bin ferrosonic   # optimized, much faster than --release
+./target/release-fast/ferrosonic             # add --standalone to skip the daemon
 ```
 
 macOS differences and limitations:

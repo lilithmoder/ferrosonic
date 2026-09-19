@@ -80,6 +80,12 @@
 
 ### Changed
 
+- **macOS documentation accuracy.** The README macOS section now describes
+  the fork's CI artifact workflow and the `release-fast` local build instead
+  of claiming no prebuilt binary exists; `docs/MACOS-PORT.md` status reflects
+  CI type-checking of the macOS modules (runtime on hardware still pending),
+  the docs index lists the current port/feature documents, and the
+  Mac-session prompt uses the fast build path.
 - **Authoritative MPRIS volume.** Volume now lives in daemon now-playing state,
   so MPRIS reflects changes from every control path and handles non-finite input.
 - **MPRIS repeat and volume.** `LoopStatus` now reflects and sets the repeat

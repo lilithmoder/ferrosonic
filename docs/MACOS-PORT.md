@@ -5,17 +5,22 @@ contains a paste-ready prompt for an OpenCode session running on a Mac.
 
 ## Summary
 
-- There is no prebuilt macOS binary and `install.sh` is Linux-only. A native
-  build from source is the only way to run on macOS.
+- There is no upstream prebuilt macOS binary and `install.sh` is Linux-only.
+  For this fork, the `macos-release` GitHub Actions workflow builds a
+  downloadable `x86_64-apple-darwin` binary on every push to `main`/
+  `macos-port` (see "Fast-build workflow" below), so a native build from
+  source is only needed when fixing macOS-only code.
 - The codebase is close to portable already. Build-time native dependencies are
   effectively nil: TLS is `rustls`, D-Bus is pure-Rust `zbus`, cover-art `chafa`
   is `dlopen`ed at runtime, and credentials use the platform keychain API.
 - `x86_64-apple-darwin` (Intel) and `aarch64-apple-darwin` (Apple Silicon) are
   both Rust Tier-1 targets.
-- **Status: unverified.** The changes below were developed and checked on Linux.
-  The macOS module is `#[cfg(target_os = "macos")]` and therefore is not
-  type-checked by the Linux build. The Mac session must build, fix, and smoke
-  test.
+- **Status: CI-verified, runtime-unverified.** The branch builds cleanly for
+  `x86_64-apple-darwin` in CI (including a lib/bins clippy pass that
+  type-checks the `#[cfg(target_os = "macos")]` modules, which the Linux build
+  cannot see), but it has never been executed on real macOS hardware. The Mac
+  session must smoke test (playback, keychain, notifications, MPRIS), fix any
+  runtime defects, and report.
 
 ## What changed in this branch
 
@@ -23,8 +28,11 @@ contains a paste-ready prompt for an OpenCode session running on a Mac.
 |---|---|
 | `src/daemon/notify.rs` | Added a `#[cfg(target_os = "macos")]` `Notifier` that shells out to `osascript` (`display notification`). Widened the no-op stub gate to platforms other than Linux/macOS. The module-level doc now covers both backends. |
 | `src/audio/pipewire.rs` | `PipeWireController` now records whether the construction probe could execute `pw-metadata`. When it cannot (missing binary, e.g. macOS), `set_rate` / `clear_forced_rate` are silent no-ops instead of warning on every track. Runner-injection tests are unaffected. |
-| `README.md` | Marked PipeWire/WirePlumber/D-Bus as Linux-specific in the dependency table, corrected the stale "OpenSSL/D-Bus dev headers" build note, and added a macOS section (Homebrew deps, config path, feature caveats). |
-| `.github/workflows/test.yml` | Added a report-only macOS build matrix for `x86_64-apple-darwin` (`macos-15-intel`) and `aarch64-apple-darwin` (`macos-15`). Nothing else in CI changed. |
+| `README.md` | Marked PipeWire/WirePlumber/D-Bus as Linux-specific in the dependency table, corrected the stale "OpenSSL/D-Bus dev headers" build note, and added a macOS section (Homebrew deps, config path, feature caveats, CI artifacts). |
+| `.github/workflows/macos-release.yml` | New: push/dispatch-triggered `x86_64-apple-darwin` artifact build (`release-fast` profile) with caching and a lib+bins clippy pass for the macOS target. |
+| `.github/workflows/linux-release.yml` | New: Linux counterpart building `x86_64-unknown-linux-gnu` on `main` pushes. |
+| `.github/workflows/test.yml` | Full test gate now triggers on `main`/`macos-port` pushes; the earlier report-only `build_macos` matrix was folded into `macos-release.yml` (it duplicated the build with a heavier `--all-targets` clippy on the same runners). |
+| `Cargo.toml` | Added `[profile.release-fast]` (thin LTO, 16 codegen units). The canonical `[profile.release]` is unchanged. |
 
 ## Feature behaviour on macOS
 
@@ -149,9 +157,11 @@ replaces that.)
 ```text
 You are working in the Ferrosonic repo (a Rust terminal Subsonic client). The
 project was developed for Linux (PipeWire sample-rate switching, freedesktop
-D-Bus notifications/MPRIS). A macOS-prepared patch is applied to the working
-tree. Your job is to build it natively on this Intel Mac, fix any remaining
-target-specific compile errors, validate runtime behaviour, and report.
+D-Bus notifications/MPRIS). The macOS port is committed on the `macos-port`
+branch (and merged into `main`) of the fork at
+https://github.com/lilithmoder/ferrosonic; CI already builds it for
+x86_64-apple-darwin on every push. Your job is to validate runtime behaviour
+on this Intel Mac, fix defects, and report.
 
 Constraints:
 - Platform-specific code stays behind #[cfg(target_os = "macos")].
@@ -161,18 +171,33 @@ Constraints:
 - Do not commit or push unless explicitly asked.
 
 Setup:
+  git clone https://github.com/lilithmoder/ferrosonic.git && cd ferrosonic
   xcode-select --install
-  rustup toolchain install stable
   brew install mpv cava chafa dbus   # dbus only if you test MPRIS
 
-Build and lint:
-1. cd upstream && cargo build --release
-   Fix compile errors only; keep changes minimal.
-2. cargo clippy --all-targets --all-features
+Get a binary (choose ONE; do NOT run `cargo build --release` or
+`--all-targets` checks locally - the release profile uses whole-program LTO
+and --all-targets compiles ~151 test binaries, which is what made the first
+port attempt unbearably slow):
+1. Preferred: download `ferrosonic-macos-x86_64` from the latest green
+   macos-release run at https://github.com/lilithmoder/ferrosonic/actions,
+   then:
+     shasum -a 256 -c ferrosonic-macos-x86_64.sha256
+     chmod +x ferrosonic-macos-x86_64
+2. Only when editing macOS-only code, build locally the fast way:
+     cargo check --bin ferrosonic                       # compile-error loop
+     cargo build --bin ferrosonic && ./target/debug/ferrosonic --standalone
+     cargo build --profile release-fast --bin ferrosonic   # quick optimized
+   Optional faster linker: brew install llvm, and in ~/.cargo/config.toml:
+     [target.x86_64-apple-darwin]
+     linker = "clang"
+     rustflags = ["-C", "link-arg=-fuse-ld=/usr/local/opt/llvm/bin/ld64.lld"]
 
 Smoke test (record exact commands and observed results):
-- Standalone playback: ./target/release/ferrosonic --standalone against a test
-  Navidrome config. Verify play/pause, seek, next/prev, gapless, queue edits,
+- Standalone playback: run the binary with `--standalone` against a test
+  Navidrome config (use `./ferrosonic-macos-x86_64 --standalone` for the CI
+  artifact, or `./target/debug/ferrosonic --standalone` for a local build).
+  Verify play/pause, seek, next/prev, gapless, queue edits,
   ReplayGain, cover art (iTerm2/kitty/sixel), cava, resize, and mouse input.
 - Daemon: run normally (daemon mode on). Confirm the daemon auto-spawns
   detached, the TUI reconnects, and the queue + position persist across a
