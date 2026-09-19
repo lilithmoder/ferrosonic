@@ -34,7 +34,7 @@ It is a ground-up Rust rewrite of [Termsonic](https://git.sixfoisneuf.fr/termson
 
 - **Persistent playback** - an optional background daemon keeps music playing after you close the terminal. [Details below](#persistent-playback).
 - **MPRIS2** - full media-key control (play, pause, stop, next, previous, seek) with push-style `PropertiesChanged` updates.
-- **Notifications** - track-change desktop notifications with cover art, fired daemon-side so they appear with the TUI closed (mako, dunst, GNOME, KDE).
+- **Notifications** - track-change desktop notifications fired daemon-side so they appear with the TUI closed. Linux uses the freedesktop D-Bus API with cover art (mako, dunst, GNOME, KDE); macOS uses `osascript` text-only (see the macOS limitations below).
 - **Scrobbling** - reports plays via classic `scrobble` plus the OpenSubsonic `reportPlayback` extension when the server advertises it (Last.fm / ListenBrainz when linked server-side).
 
 ### Interface
@@ -94,8 +94,9 @@ sudo cp target/release/ferrosonic /usr/local/bin/
 `install.sh` is Linux-only. Two ways to get a binary on macOS:
 
 - **Download a CI artifact** (recommended): every push to `main`/`macos-port`
-  builds a `ferrosonic-macos-x86_64` binary plus SHA-256 under the Actions
-  tab (`macos-release` workflow). See `docs/MACOS-PORT.md` for the workflow,
+  builds `ferrosonic-macos-x86_64` (Intel) and `ferrosonic-macos-aarch64`
+  (Apple Silicon) binaries plus SHA-256 under the Actions tab
+  (`macos-release` workflow). See `docs/MACOS-PORT.md` for the workflow,
   the fast local build loop, and macOS caveats.
 - **Build from source.** Homebrew supplies the runtime pieces:
 
@@ -103,6 +104,7 @@ sudo cp target/release/ferrosonic /usr/local/bin/
 xcode-select --install                       # Command Line Tools
 brew install mpv                             # required playback engine
 brew install cava chafa                      # optional: visualizer / better half-blocks
+brew install terminal-notifier               # optional: reliable macOS notifications with cover art
 brew install dbus                            # optional: only if you want MPRIS
 cargo build --profile release-fast --bin ferrosonic   # optimized, much faster than --release
 ./target/release-fast/ferrosonic             # add --standalone to skip the daemon
@@ -114,12 +116,20 @@ macOS differences and limitations:
   (macOS's config dir, not `~/.config`). Override with `FERROSONIC_CONFIG_DIR`.
 - **Passwords** are stored in the macOS Keychain, the equivalent of Secret
   Service on Linux.
-- **No bit-perfect sample-rate switching.** macOS has no PipeWire, so
-  `pw-metadata` is unavailable and rate matching is skipped automatically.
-  Playback still goes through mpv and CoreAudio; the quality readout still shows
-  the decoded rate.
-- **Notifications** use `osascript`'s `display notification`. They are text-only
-  (no cover art), because AppleScript's notification API has no image field.
+- **Sample-rate switching uses mpv's CoreAudio options instead of PipeWire.**
+  `pw-metadata` is unavailable, so rate matching is skipped automatically and
+  the `RateSwitchDelayMs` settle pause never delays playback. For bit-perfect
+  output, set `MacosAudioMode = "physical-format"` (the device follows each
+  track's sample rate) or `"exclusive"` (hog mode, no system mixing; locks out
+  other apps and does not work on every output, e.g. Bluetooth/AirPods). The
+  quality readout still shows the decoded rate.
+- **Notifications** prefer Homebrew's `terminal-notifier` when installed
+  (`brew install terminal-notifier`): it posts through Apple's modern
+  `UserNotifications` framework, replaces the previous track's banner, and
+  attaches cover art. Without it, Ferrosonic falls back to `osascript`'s
+  `display notification`, which is text-only and known not to appear reliably
+  on macOS 15 Sequoia. Notification failures are logged at `warn` level in
+  `ferrosonicd.log` (see `docs/MACOS-PORT.md` for diagnosis).
 - **MPRIS** requires a D-Bus session bus (`brew services start dbus`, or
   `dbus-launch`). macOS has no native MPRIS consumer, so this alone does not wire
   up the media keys / Control Center; a native Now Playing backend would be
@@ -155,6 +165,13 @@ For users who want the daemon at login time, a systemd user unit is shipped unde
 mkdir -p ~/.config/systemd/user
 cp contrib/ferrosonicd.service ~/.config/systemd/user/
 systemctl --user enable --now ferrosonicd.service
+```
+
+On macOS the counterpart is a launchd agent under [`contrib/ferrosonicd.plist`](contrib/ferrosonicd.plist); adjust `ProgramArguments` if the binary is not at `/usr/local/bin/ferrosonic`:
+
+```bash
+cp contrib/ferrosonicd.plist ~/Library/LaunchAgents/com.ferrosonic.daemon.plist
+launchctl bootstrap gui/"$(id -u)" ~/Library/LaunchAgents/com.ferrosonic.daemon.plist
 ```
 
 ## Configuration
@@ -215,7 +232,8 @@ ReplayGainClip = false
 | `CoverArt` | Show cover art in the now-playing section (kitty / iTerm2 / sixel terminals) |
 | `CoverArtSize` | Cover art pane width in columns (default 16) |
 | `Scrobble` | Report plays to the server, default `true` (classic `scrobble` + OpenSubsonic `reportPlayback`) |
-| `Notifications` | Desktop track-change notifications with cover art, default `true` |
+| `Notifications` | Desktop track-change notifications, default `true`. Cover art on Linux (freedesktop D-Bus); text-only on macOS (`osascript`) |
+| `MacosAudioMode` | macOS-only CoreAudio output: `"off"` (default, shared), `"physical-format"` (device follows the track's rate), or `"exclusive"` (hog mode, no system mixing). Ignored on Linux. Applies when the daemon next starts mpv |
 | `ReplayGainMode` | ReplayGain adjustment mode: `"no"`, `"track"`, or `"album"`, default `"no"`. Passed to mpv and applied live if a track is playing. |
 | `ReplayGainPreamp` | ReplayGain preamp offset in dB, `-15.0` to `15.0`, default `0.0`. Values must be finite; NaN and infinities are rejected |
 | `ReplayGainClip` | Prevent clipping from ReplayGain amplification, default `false` |

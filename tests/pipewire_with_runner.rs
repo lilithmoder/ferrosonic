@@ -103,6 +103,43 @@ async fn new_with_unknown_rate_records_zero() {
 }
 
 #[tokio::test]
+async fn successful_probe_marks_controller_available() {
+    let runner = FakeRunner::new();
+    runner.set_initial_query("");
+    let ctrl = PipeWireController::with_runner(Arc::new(runner));
+    assert!(ctrl.is_available());
+}
+
+#[tokio::test]
+async fn failed_probe_marks_controller_unavailable() {
+    let runner = FakeRunner::new();
+    runner.fail_next_with("pw-metadata missing");
+    let ctrl = PipeWireController::with_runner(Arc::new(runner.clone()));
+    assert!(!ctrl.is_available());
+    assert_eq!(ctrl.get_original_rate(), None);
+    assert_eq!(
+        runner.calls().len(),
+        1,
+        "only the construction probe may run when unavailable"
+    );
+}
+
+#[tokio::test]
+async fn unavailable_controller_set_and_clear_are_noops() {
+    let runner = FakeRunner::new();
+    runner.fail_next_with("pw-metadata missing");
+    let mut ctrl = PipeWireController::with_runner(Arc::new(runner.clone()));
+    ctrl.set_rate(48_000).await.expect("set_rate must not fail");
+    ctrl.clear_forced_rate().await.expect("clear must not fail");
+    assert_eq!(ctrl.get_current_rate(), None);
+    assert_eq!(
+        runner.calls().len(),
+        1,
+        "no pw-metadata calls may be issued while unavailable"
+    );
+}
+
+#[tokio::test]
 async fn set_rate_invokes_runner_with_expected_args() {
     let runner = FakeRunner::new();
     runner.set_initial_query("");

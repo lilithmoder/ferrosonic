@@ -117,10 +117,14 @@ fn find_chafa_in_nix_store() -> Option<String> {
         if name.ends_with("-bin") || name.ends_with("-dev") || name.ends_with("-man") {
             continue;
         }
-        let lib = path.join("lib").join("libchafa.so.0");
-        if lib.is_file() {
-            if let Some(s) = lib.to_str().map(String::from) {
-                return Some(s);
+        let lib_dir = path.join("lib");
+        // Linux Nix stores ship the soname; nix-darwin ships a dylib.
+        for file in ["libchafa.so.0", "libchafa.dylib"] {
+            let lib = lib_dir.join(file);
+            if lib.is_file() {
+                if let Some(s) = lib.to_str().map(String::from) {
+                    return Some(s);
+                }
             }
         }
     }

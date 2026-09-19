@@ -1,9 +1,10 @@
 name: macos-release
 
-# Builds a downloadable macOS binary without tying up the local Mac.
+# Builds downloadable macOS binaries without tying up the local Mac.
 # Runs automatically on every push to main or macos-port and can also be
 # triggered manually from the Actions tab (the file lives on the default
-# branch). The heavy Linux test suite lives in test.yml and is not run here.
+# branch). The heavy Linux test suite lives in test.yml; this workflow adds a
+# lib-only test job so the macOS cfg paths get executed somewhere.
 on:
   push:
     branches: [main, macos-port]
@@ -31,20 +32,30 @@ permissions:
 
 jobs:
   build:
-    name: artifact (x86_64-apple-darwin, ${{ inputs.profile || 'release-fast' }})
-    # macos-15-intel is GitHub's last Intel image (supported until Fall 2027)
-    # and matches the user's Intel Mac. First cold run is slow; later runs
-    # reuse the rust-cache entry.
-    runs-on: macos-15-intel
+    name: artifact (${{ matrix.target }}, ${{ inputs.profile || 'release-fast' }})
+    # macos-15-intel is GitHub's last Intel image (supported until Fall 2027);
+    # macos-15 is Apple Silicon. First cold run is slow; later runs reuse the
+    # rust-cache entry.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            artifact: ferrosonic-macos-x86_64
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            artifact: ferrosonic-macos-aarch64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-apple-darwin
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: x86_64-apple-darwin
+          key: ${{ matrix.target }}
           # Release-profile artifacts are large; keep the cache under the
           # 10 GB GitHub limit by dropping debug info from cached builds.
           env-vars: CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_PROFILE_RELEASE_FAST_DEBUG=0
@@ -52,7 +63,7 @@ jobs:
       # build, which is what makes this job tractable on the 3-core runner.
       - name: Build
         run: |
-          cargo build --locked --target x86_64-apple-darwin \
+          cargo build --locked --target ${{ matrix.target }} \
             --profile "${{ inputs.profile || 'release-fast' }}" \
             --bin ferrosonic
       # Lint the production code for the macOS target on every push; the
@@ -60,16 +71,33 @@ jobs:
       # #[cfg(target_os = "macos")] modules. lib+bins only: --all-targets
       # would compile ~151 test binaries on the 3-core runner.
       - name: Clippy (macOS cfg coverage)
-        run: cargo clippy --lib --bins --locked --target x86_64-apple-darwin
+        run: cargo clippy --lib --bins --locked --target ${{ matrix.target }}
       - name: Stage artifact
         run: |
           prof="${{ inputs.profile || 'release-fast' }}"
           mkdir -p stage
-          cp "target/x86_64-apple-darwin/${prof}/ferrosonic" "stage/ferrosonic-macos-x86_64"
+          cp "target/${{ matrix.target }}/${prof}/ferrosonic" "stage/${{ matrix.artifact }}"
           # Bare filename so `shasum -a 256 -c` works from inside the download.
-          (cd stage && shasum -a 256 ferrosonic-macos-x86_64 > ferrosonic-macos-x86_64.sha256)
+          (cd stage && shasum -a 256 "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256")
       - uses: actions/upload-artifact@v7
         with:
-          name: ferrosonic-macos-x86_64
+          name: ${{ matrix.artifact }}
           path: stage/
           if-no-files-found: error
+
+  # Lib unit tests on Apple Silicon. Integration tests (~151 binaries) are too
+  # slow for the macOS runners; the Linux gate in test.yml covers those. This
+  # job executes the #[cfg(target_os = "macos")] code the Linux gate cannot.
+  test-lib:
+    name: lib tests (macos-15)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-lib-tests
+          env-vars: CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_PROFILE_RELEASE_FAST_DEBUG=0
+      - name: Lib tests
+        run: cargo test --locked --lib

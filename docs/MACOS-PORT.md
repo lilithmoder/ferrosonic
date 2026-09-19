@@ -6,21 +6,23 @@ contains a paste-ready prompt for an OpenCode session running on a Mac.
 ## Summary
 
 - There is no upstream prebuilt macOS binary and `install.sh` is Linux-only.
-  For this fork, the `macos-release` GitHub Actions workflow builds a
-  downloadable `x86_64-apple-darwin` binary on every push to `main`/
-  `macos-port` (see "Fast-build workflow" below), so a native build from
-  source is only needed when fixing macOS-only code.
+  For this fork, the `macos-release` GitHub Actions workflow builds
+  downloadable `x86_64-apple-darwin` (Intel) and `aarch64-apple-darwin`
+  (Apple Silicon) binaries on every push to `main`/`macos-port` (see
+  "Fast-build workflow" below), so a native build from source is only needed
+  when fixing macOS-only code.
 - The codebase is close to portable already. Build-time native dependencies are
   effectively nil: TLS is `rustls`, D-Bus is pure-Rust `zbus`, cover-art `chafa`
   is `dlopen`ed at runtime, and credentials use the platform keychain API.
 - `x86_64-apple-darwin` (Intel) and `aarch64-apple-darwin` (Apple Silicon) are
   both Rust Tier-1 targets.
-- **Status: CI-verified, runtime-unverified.** The branch builds cleanly for
-  `x86_64-apple-darwin` in CI (including a lib/bins clippy pass that
-  type-checks the `#[cfg(target_os = "macos")]` modules, which the Linux build
-  cannot see), but it has never been executed on real macOS hardware. The Mac
-  session must smoke test (playback, keychain, notifications, MPRIS), fix any
-  runtime defects, and report.
+- **Status: CI-verified, partially runtime-verified (macOS 15 Sequoia, Intel).**
+  The branch builds cleanly for `x86_64-apple-darwin` in CI (including a
+  lib/bins clippy pass that type-checks the `#[cfg(target_os = "macos")]`
+  modules, which the Linux build cannot see). Playback, the daemon, and the
+  Keychain have been confirmed working on hardware. **Notifications do not
+  appear** on Sequoia via `osascript` and need a functional fix (see decision
+  points). MPRIS over Homebrew D-Bus remains untested.
 
 ## What changed in this branch
 
@@ -29,7 +31,7 @@ contains a paste-ready prompt for an OpenCode session running on a Mac.
 | `src/daemon/notify.rs` | Added a `#[cfg(target_os = "macos")]` `Notifier` that shells out to `osascript` (`display notification`). Widened the no-op stub gate to platforms other than Linux/macOS. The module-level doc now covers both backends. |
 | `src/audio/pipewire.rs` | `PipeWireController` now records whether the construction probe could execute `pw-metadata`. When it cannot (missing binary, e.g. macOS), `set_rate` / `clear_forced_rate` are silent no-ops instead of warning on every track. Runner-injection tests are unaffected. |
 | `README.md` | Marked PipeWire/WirePlumber/D-Bus as Linux-specific in the dependency table, corrected the stale "OpenSSL/D-Bus dev headers" build note, and added a macOS section (Homebrew deps, config path, feature caveats, CI artifacts). |
-| `.github/workflows/macos-release.yml` | New: push/dispatch-triggered `x86_64-apple-darwin` artifact build (`release-fast` profile) with caching and a lib+bins clippy pass for the macOS target. |
+| `.github/workflows/macos-release.yml` | Push/dispatch-triggered artifact builds (`release-fast` profile) for `x86_64-apple-darwin` and `aarch64-apple-darwin` with caching and a lib+bins clippy pass per target, plus a `cargo test --lib` job on Apple Silicon. |
 | `.github/workflows/linux-release.yml` | New: Linux counterpart building `x86_64-unknown-linux-gnu` on `main` pushes. |
 | `.github/workflows/test.yml` | Full test gate now triggers on `main`/`macos-port` pushes; the earlier report-only `build_macos` matrix was folded into `macos-release.yml` (it duplicated the build with a heavier `--all-targets` clippy on the same runners). |
 | `Cargo.toml` | Added `[profile.release-fast]` (thin LTO, 16 codegen units). The canonical `[profile.release]` is unchanged. |
@@ -42,8 +44,8 @@ contains a paste-ready prompt for an OpenCode session running on a Mac.
 | Daemon + queue persistence | Works. IPC is a Unix domain socket; with no `XDG_RUNTIME_DIR` it falls back to `/tmp/ferrosonic-<uid>/ferrosonicd.sock`. |
 | Keychain | Works. keyring v4's default `v1` feature auto-selects macOS Keychain Services. |
 | Cover art | Works. `probe_chafa` already tries `libchafa.dylib` and both Homebrew prefixes (`/opt/homebrew/lib` for ARM, `/usr/local/lib` for Intel). Terminal image protocols (iTerm2/kitty/sixel) are handled by `ratatui-image`. |
-| Sample-rate switching | **Unavailable.** No PipeWire. Automatically skipped (no warning spam). The decoded quality readout still works. |
-| Notifications | Implemented via `osascript`, text only (no cover art). |
+| Sample-rate switching | No PipeWire, but `MacosAudioMode` passes mpv's CoreAudio options instead: `"physical-format"` makes the device follow each track's rate (closest analog to `clock.force-rate`), `"exclusive"` adds hog mode. Default `"off"` (shared). The `RateSwitchDelayMs` settle pause is skipped on macOS, so playback never stalls waiting for a re-clock that cannot happen. The decoded quality readout still works. |
+| Notifications | Prefers Homebrew `terminal-notifier` when installed (modern `UserNotifications`, banner replacement, cover art); falls back to text-only `osascript`, which **does not appear on macOS 15 Sequoia** (runtime-confirmed). Failures log at `warn`. |
 | MPRIS | Compiles and runs against a D-Bus session bus, but macOS has no native MPRIS consumer, so it does **not** provide media-key / Control Center integration by itself. |
 | systemd unit / installer | N/A. |
 
@@ -60,15 +62,15 @@ is what made the first port attempt unbearably slow. Two faster paths:
    (`https://github.com/lilithmoder/ferrosonic`) — every push builds a fresh
    artifact automatically.
 2. Open the finished run under the Actions tab → **macos-release**, download
-   `ferrosonic-macos-x86_64`, then:
+   `ferrosonic-macos-aarch64` (Apple Silicon) or `ferrosonic-macos-x86_64`
+   (Intel), then:
    ```bash
-   shasum -a 256 -c ferrosonic-macos-x86_64.sha256
-   chmod +x ferrosonic-macos-x86_64
-   ./ferrosonic-macos-x86_64 --standalone
+   shasum -a 256 -c ferrosonic-macos-aarch64.sha256
+   chmod +x ferrosonic-macos-aarch64
+   ./ferrosonic-macos-aarch64 --standalone
    ```
-   The first CI run compiles all dependencies cold (~20–40 min on the 3-core
-   Intel runner); later runs reuse the cache and are much quicker. The Mac
-   itself never compiles anything.
+   The first CI run compiles all dependencies cold; later runs reuse the cache
+   and are much quicker. The Mac itself never compiles anything.
 
 ### B. Local fast iteration on the Mac
 
@@ -112,20 +114,79 @@ observed output, code fixes (file:line), and any remaining failures.
 
 ## Decision points to settle on the Mac
 
-1. **Native media keys.** If media-key / Control Center integration is required
-   (it was listed as a priority), MPRIS is not sufficient on macOS. Options:
-   a native Now Playing backend (`souvlaki`, `ctrl`, or a small Objective-C
-   shim around `MPNowPlayingInfoCenter` + `MPRemoteCommandCenter`), or accept
-   that media keys are unavailable. This is a new subsystem, not a `cfg` fix —
-   scope it separately.
-2. **Notification cover art.** `osascript` cannot attach an image. If cover art
-   in notifications matters, the fallback is the Homebrew `terminal-notifier`
-   binary (`-contentImage`), used only when present.
+1. **Native media keys.** MPRIS is not sufficient on macOS, and since macOS
+   15.4 the private MediaRemote framework rejects unentitled processes, so the
+   only sanctioned route is `MPNowPlayingInfoCenter` + `MPRemoteCommandCenter`.
+   The open question is whether those work from a bare CLI process (no
+   `NSApplication`/app bundle). `souvlaki` and `playwire` document that macOS
+   needs a run loop, so run this spike on the Mac before choosing an
+   implementation:
+
+   ```swift
+   // /tmp/nowplaying-probe.swift — run: swift /tmp/nowplaying-probe.swift
+   import MediaPlayer
+   import Foundation
+
+   let info = MPNowPlayingInfoCenter.default()
+   info.nowPlayingInfo = [
+       MPMediaItemPropertyTitle: "Ferrosonic probe",
+       MPMediaItemPropertyArtist: "Test Artist",
+       MPMediaItemPropertyPlaybackDuration: 300.0,
+       MPNowPlayingInfoPropertyElapsedPlaybackTime: 0.0,
+       MPNowPlayingInfoPropertyPlaybackRate: 1.0,
+   ]
+   info.playbackState = .playing
+
+   let cc = MPRemoteCommandCenter.shared()
+   cc.playCommand.addTarget { _ in print("play"); return .success }
+   cc.pauseCommand.addTarget { _ in print("pause"); return .success }
+   cc.togglePlayPauseCommand.addTarget { _ in print("toggle"); return .success }
+   cc.nextTrackCommand.addTarget { _ in print("next"); return .success }
+   cc.previousTrackCommand.addTarget { _ in print("prev"); return .success }
+   cc.changePlaybackPositionCommand.addTarget { event in
+       if let e = event as? MPChangePlaybackPositionCommandEvent {
+           print("seek \(e.positionTime)")
+       }
+       return .success
+   }
+
+   print("now playing set; press media keys / check Control Center")
+   RunLoop.main.run()
+   ```
+
+   Check whether the track appears in Control Center and whether the media
+   keys print events. Repeat with the process detached (`nohup swift ... &`) to
+   mimic the daemon. If events arrive without a bundle, implement a
+   `#[cfg(target_os = "macos")]` Now Playing backend fed by the daemon's
+   `MprisPropertySnapshot`/`build_metadata_for` seams and the `DaemonRequest`
+   command path; if not, a signed helper app bundle is required. Either way
+   this is a new subsystem — scope it separately.
+2. **Notifications.** Runtime testing on macOS 15 Sequoia showed no banner
+   appears from `osascript` `display notification` at all. The notifier now
+   prefers Homebrew's `terminal-notifier` when it is on PATH
+   (`brew install terminal-notifier`; v3 is maintained, rebuilt on
+   `UserNotifications`, and has Sequoia/Tahoe bottles), using `-group` to
+   replace the previous banner and `-contentImage` for cover art. Without it,
+   the `osascript` fallback remains, and failures now log at `warn` level so
+   they are visible in `ferrosonicd.log` instead of only with `-v`.
+   To diagnose a still-missing banner on the Mac:
+   - `osascript -e 'display notification "test" with title "ferrosonic"'` from
+     Terminal; check System Settings -> Notifications for Script Editor (grant
+     if listed) and for terminal-notifier.
+   - `log stream --predicate 'process == "osascript" or process == "terminal-notifier"'`
+     while a track changes, and check the daemon log for the new `warn` line.
+   If both paths are blocked by TCC, the remaining option is a signed helper
+   app bundle (`UNUserNotificationCenter`); scope that separately.
 3. **Gate the macOS build.** The old report-only `build_macos` matrix in
    `test.yml` was folded into the `macos-release` workflow, which now builds
    the macOS binary and runs a lib+bins clippy pass on every push to
    `main`/`macos-port`. To make that block instead of just report, have the
    clippy step use `-D warnings` once the port is verified on hardware.
+4. **Surface `MacosAudioMode` in Settings.** It is config-file only for now.
+   Once `physical-format` / `exclusive` are verified against real DACs and
+   Bluetooth outputs, add a Settings row (the page's row list is currently a
+   fixed array, so this needs a small conditional-row change) and decide
+   whether the mode can be switched live rather than at the next mpv start.
 
 ## Transfer
 
@@ -160,8 +221,8 @@ project was developed for Linux (PipeWire sample-rate switching, freedesktop
 D-Bus notifications/MPRIS). The macOS port is committed on the `macos-port`
 branch (and merged into `main`) of the fork at
 https://github.com/lilithmoder/ferrosonic; CI already builds it for
-x86_64-apple-darwin on every push. Your job is to validate runtime behaviour
-on this Intel Mac, fix defects, and report.
+x86_64-apple-darwin and aarch64-apple-darwin on every push. Your job is to
+validate runtime behaviour on this Mac, fix defects, and report.
 
 Constraints:
 - Platform-specific code stays behind #[cfg(target_os = "macos")].
@@ -173,17 +234,18 @@ Constraints:
 Setup:
   git clone https://github.com/lilithmoder/ferrosonic.git && cd ferrosonic
   xcode-select --install
-  brew install mpv cava chafa dbus   # dbus only if you test MPRIS
+  brew install mpv cava chafa terminal-notifier dbus
+  # dbus only if you test MPRIS; terminal-notifier for reliable notifications
 
 Get a binary (choose ONE; do NOT run `cargo build --release` or
 `--all-targets` checks locally - the release profile uses whole-program LTO
 and --all-targets compiles ~151 test binaries, which is what made the first
 port attempt unbearably slow):
-1. Preferred: download `ferrosonic-macos-x86_64` from the latest green
-   macos-release run at https://github.com/lilithmoder/ferrosonic/actions,
-   then:
-     shasum -a 256 -c ferrosonic-macos-x86_64.sha256
-     chmod +x ferrosonic-macos-x86_64
+1. Preferred: download `ferrosonic-macos-aarch64` (Apple Silicon) or
+   `ferrosonic-macos-x86_64` (Intel) from the latest green macos-release run
+   at https://github.com/lilithmoder/ferrosonic/actions, then:
+     shasum -a 256 -c ferrosonic-macos-aarch64.sha256
+     chmod +x ferrosonic-macos-aarch64
 2. Only when editing macOS-only code, build locally the fast way:
      cargo check --bin ferrosonic                       # compile-error loop
      cargo build --bin ferrosonic && ./target/debug/ferrosonic --standalone
@@ -195,7 +257,7 @@ port attempt unbearably slow):
 
 Smoke test (record exact commands and observed results):
 - Standalone playback: run the binary with `--standalone` against a test
-  Navidrome config (use `./ferrosonic-macos-x86_64 --standalone` for the CI
+  Navidrome config (use `./ferrosonic-macos-aarch64 --standalone` for the CI
   artifact, or `./target/debug/ferrosonic --standalone` for a local build).
   Verify play/pause, seek, next/prev, gapless, queue edits,
   ReplayGain, cover art (iTerm2/kitty/sixel), cava, resize, and mouse input.
@@ -206,7 +268,9 @@ Smoke test (record exact commands and observed results):
   macOS Keychain (`security find-generic-password -s ferrosonic`) and is not
   written as plaintext in the config.
 - Notifications: with Notifications=true, play tracks and confirm a banner
-  appears. If not, capture the log line and the osascript stderr and report.
+  appears (install terminal-notifier first; the notifier prefers it). If not,
+  check ferrosonicd.log for the new warn line, then run the diagnostics in the
+  "Decision points" section above and report.
 - MPRIS: `brew services start dbus` (or `dbus-launch --sh-syntax`), then check:
     dbus-send --session --print-reply --dest=org.freedesktop.DBus \
       /org/freedesktop/DBus org.freedesktop.DBus.ListNames | grep mpris
@@ -216,7 +280,9 @@ Smoke test (record exact commands and observed results):
 Notes:
 - Config/logs/queue live under ~/Library/Application Support/ferrosonic/.
   Override with FERROSONIC_CONFIG_DIR.
-- PipeWire is absent; sample-rate switching is expected to be skipped silently.
+- PipeWire is absent; rate switching is skipped silently. Test
+  `MacosAudioMode = "physical-format"` and `"exclusive"` in config.toml
+  (restart the daemon between changes) and report what the DAC reports.
 - The daemon IPC socket falls back to /tmp/ferrosonic-<uid>/ferrosonicd.sock.
 
 Final report: commands run, results, code fixes (file:line), skipped checks, and

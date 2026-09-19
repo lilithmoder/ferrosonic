@@ -234,8 +234,9 @@ pub struct DaemonCore {
     pub(super) scrobble_state: Mutex<crate::daemon::scrobble::ScrobbleState>,
     /// True when the server advertises the `playbackReport` extension.
     pub(super) playback_report_supported: AtomicBool,
-    /// Sends desktop notifications on track change (Linux D-Bus); no-op when
-    /// disabled in config or when no session bus is reachable.
+    /// Sends desktop notifications on track change (D-Bus on Linux,
+    /// `osascript` on macOS); no-op when disabled in config or when the
+    /// platform backend is unavailable.
     pub(super) notifier: crate::daemon::notify::Notifier,
 }
 
@@ -268,6 +269,9 @@ impl DaemonCore {
             config.replay_gain_preamp,
             config.replay_gain_clip,
         );
+        // macOS-only: bit-perfect CoreAudio output mode, applied at spawn.
+        #[cfg(target_os = "macos")]
+        mpv.set_macos_audio_mode_startup(config.macos_audio_mode);
 
         let subsonic = if config.is_configured() {
             match SubsonicClient::new(&config.base_url, &config.username, &config.password) {
@@ -1313,7 +1317,9 @@ impl DaemonCore {
                 if self.settle_superseded(gen) {
                     return;
                 }
-                let changed = pw.get_current_rate() != Some(rate);
+                // Without an available controller (e.g. macOS) no re-clock
+                // happens, so there is no switch to settle for.
+                let changed = pw.is_available() && pw.get_current_rate() != Some(rate);
                 // Always re-issue (staleness defense vs external pw-metadata);
                 // only the settle delay is gated on an actual rate change.
                 if let Err(e) = pw.set_rate(rate).await {

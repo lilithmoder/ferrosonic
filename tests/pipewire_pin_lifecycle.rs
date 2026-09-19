@@ -9,7 +9,7 @@ use std::time::Duration;
 use common::{songs, RecordingPwRunner, TestDaemon};
 use ferrosonic::daemon::core::PlayMode;
 use ferrosonic::daemon::state::PlaybackState;
-use serde_json::json;
+use serde_json::{json, Value};
 use serial_test::serial;
 use tokio::time::timeout;
 
@@ -28,6 +28,54 @@ async fn wait_for_force_rate(pw: &RecordingPwRunner, want: &str) -> bool {
     })
     .await
     .is_ok()
+}
+
+/// True once the captured commands contain an unpause (`set_property
+/// pause false`).
+fn saw_unpause(cmds: &[Vec<Value>]) -> bool {
+    cmds.iter().any(|c| {
+        c.first().and_then(Value::as_str) == Some("set_property")
+            && c.get(1).and_then(Value::as_str) == Some("pause")
+            && c.get(2).and_then(Value::as_bool) == Some(false)
+    })
+}
+
+/// Regression: on hosts without `pw-metadata` (macOS) no rate change ever
+/// happens, so the daemon must not treat every track as a switch and sleep
+/// `RateSwitchDelayMs`. The 60s delay below makes the old always-"changed"
+/// behaviour unmistakable: play would never unpause within the wait and
+/// resume would blow the timeout.
+#[tokio::test]
+#[serial]
+async fn unavailable_pipewire_skips_settle_delay() {
+    let td = TestDaemon::new_with_unavailable_pw().await;
+    td.fake_mpv
+        .set_property("audio-params/samplerate", json!(44_100))
+        .await;
+    {
+        let mut s = td.state.write().await;
+        s.queue = songs("t", 1);
+        s.config.rate_switch_delay_ms = 60_000;
+    }
+
+    timeout(OP, td.core.play_queue_position(0, PlayMode::Direct))
+        .await
+        .expect("play did not hang")
+        .unwrap();
+    assert!(
+        td.fake_mpv.wait_for(2_000, saw_unpause).await,
+        "play must unpause without waiting out the rate settle delay"
+    );
+
+    timeout(OP, td.core.pause_playback())
+        .await
+        .expect("pause did not hang")
+        .unwrap();
+
+    timeout(OP, td.core.resume_playback())
+        .await
+        .expect("resume must not wait out the rate settle delay")
+        .unwrap();
 }
 
 #[tokio::test]

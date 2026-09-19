@@ -46,6 +46,7 @@ pub const KNOWN_CONFIG_KEYS: &[&str] = &[
     "Scrobble",
     "Notifications",
     "RateSwitchDelayMs",
+    "MacosAudioMode",
     "MusicFolderId",
     "MusicFolderChosen",
     // Retired Podsonic-bound settings remain accepted so configs written by
@@ -226,19 +227,32 @@ pub struct Config {
     #[serde(rename = "Scrobble", default = "Config::default_scrobble")]
     pub scrobble: bool,
 
-    /// Show a desktop notification on track change (Linux D-Bus). On by default.
+    /// Show a desktop notification on track change (Linux D-Bus; `osascript`
+    /// on macOS, text only). On by default.
     #[serde(rename = "Notifications", default = "Config::default_notifications")]
     pub notifications: bool,
 
     /// Milliseconds to hold the track paused after re-clocking the audio
     /// device so the `PipeWire` rate switch lands in silence, not in the
     /// first frames of music. Device-dependent; raise for DACs that
-    /// re-lock slowly. Only applied when the rate actually changes.
+    /// re-lock slowly. Only applied when the rate actually changes, so it
+    /// never delays playback where `pw-metadata` is unavailable (macOS).
     #[serde(
         rename = "RateSwitchDelayMs",
         default = "Config::default_rate_switch_delay_ms"
     )]
     pub rate_switch_delay_ms: u32,
+
+    /// macOS-only `CoreAudio` output mode for bit-perfect playback:
+    /// `"off"`, `"physical-format"`, or `"exclusive"`. Ignored on Linux,
+    /// where `PipeWire` force-rate is always used. Omitted from the file
+    /// when `"off"`.
+    #[serde(
+        rename = "MacosAudioMode",
+        default = "Config::default_macos_audio_mode",
+        skip_serializing_if = "MacosAudioMode::is_off"
+    )]
+    pub macos_audio_mode: MacosAudioMode,
 
     /// Library to browse and play from (`musicFolderId`); `None` = all.
     #[serde(rename = "MusicFolderId", default)]
@@ -369,6 +383,11 @@ struct ConfigOnDisk<'a> {
     notifications: bool,
     #[serde(rename = "RateSwitchDelayMs")]
     rate_switch_delay_ms: u32,
+    #[serde(
+        rename = "MacosAudioMode",
+        skip_serializing_if = "MacosAudioMode::is_off"
+    )]
+    macos_audio_mode: MacosAudioMode,
     #[serde(rename = "MusicFolderId", skip_serializing_if = "Option::is_none")]
     music_folder_id: Option<i64>,
     #[serde(
@@ -447,6 +466,7 @@ impl Config {
             scrobble: self.scrobble,
             notifications: self.notifications,
             rate_switch_delay_ms: self.rate_switch_delay_ms,
+            macos_audio_mode: self.macos_audio_mode,
             music_folder_id: self.music_folder_id,
             music_folder_chosen: self.music_folder_chosen,
             replay_gain_mode: self.replay_gain_mode,
@@ -638,6 +658,63 @@ impl ReplayGainMode {
     }
 }
 
+/// macOS-only `CoreAudio` output mode, applied as mpv arguments at spawn.
+///
+/// The daemon seeds mpv with the configured mode when it starts (or
+/// restarts) mpv. Linux has no equivalent setting: the `PipeWire`
+/// force-rate path always handles sample-rate matching there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MacosAudioMode {
+    /// Shared `CoreAudio` output. The system mixer may resample to the
+    /// device's nominal rate; this is mpv's default.
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    /// Shared output, but the device's physical format (including sample
+    /// rate) follows each track. The closest analog to `PipeWire`'s
+    /// `clock.force-rate`, without hogging the device.
+    #[serde(rename = "physical-format")]
+    PhysicalFormat,
+    /// Exclusive (hog) mode: direct device access with no system mixing.
+    /// Locks other apps out of the output device and is unavailable on
+    /// some outputs (Bluetooth/AirPods). Take effect on the next mpv
+    /// (re)start.
+    #[serde(rename = "exclusive")]
+    Exclusive,
+}
+
+impl MacosAudioMode {
+    /// True for [`MacosAudioMode::Off`]; drives `skip_serializing_if` so the
+    /// platform-specific key stays out of configs that never set it.
+    #[must_use]
+    pub const fn is_off(&self) -> bool {
+        matches!(self, Self::Off)
+    }
+
+    /// The mpv argument this mode adds at spawn, or `None` for shared output.
+    ///
+    /// ```
+    /// use ferrosonic::config::MacosAudioMode;
+    /// assert_eq!(MacosAudioMode::Off.mpv_arg(), None);
+    /// assert_eq!(
+    ///     MacosAudioMode::PhysicalFormat.mpv_arg(),
+    ///     Some("--coreaudio-change-physical-format=yes")
+    /// );
+    /// assert_eq!(
+    ///     MacosAudioMode::Exclusive.mpv_arg(),
+    ///     Some("--audio-exclusive=yes")
+    /// );
+    /// ```
+    #[must_use]
+    pub const fn mpv_arg(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::PhysicalFormat => Some("--coreaudio-change-physical-format=yes"),
+            Self::Exclusive => Some("--audio-exclusive=yes"),
+        }
+    }
+}
+
 /// Minimum `ReplayGain` preamp in dB, matching mpv's `--replaygain-preamp` range.
 pub const REPLAY_GAIN_PREAMP_MIN: f64 = -15.0;
 /// Maximum `ReplayGain` preamp in dB, matching mpv's `--replaygain-preamp` range.
@@ -670,6 +747,7 @@ impl Default for Config {
             scrobble: Self::default_scrobble(),
             notifications: Self::default_notifications(),
             rate_switch_delay_ms: Self::default_rate_switch_delay_ms(),
+            macos_audio_mode: Self::default_macos_audio_mode(),
             music_folder_id: None,
             music_folder_chosen: false,
             password_eval: None,
@@ -743,6 +821,10 @@ impl Config {
 
     const fn default_rate_switch_delay_ms() -> u32 {
         500
+    }
+
+    const fn default_macos_audio_mode() -> MacosAudioMode {
+        MacosAudioMode::Off
     }
 
     /// Alias for [`Config::default`].
@@ -1222,6 +1304,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn macos_audio_mode_defaults_off_and_parses_known_values() {
+        assert_eq!(
+            Config::default().macos_audio_mode,
+            MacosAudioMode::Off,
+            "shared output must stay the default"
+        );
+        let parsed: Config = toml::from_str("MacosAudioMode = \"physical-format\"").unwrap();
+        assert_eq!(parsed.macos_audio_mode, MacosAudioMode::PhysicalFormat);
+        let parsed: Config = toml::from_str("MacosAudioMode = \"exclusive\"").unwrap();
+        assert_eq!(parsed.macos_audio_mode, MacosAudioMode::Exclusive);
+    }
+
+    #[test]
+    fn macos_audio_mode_rejects_unknown_value() {
+        let err = toml::from_str::<Config>("MacosAudioMode = \"bogus\"").unwrap_err();
+        assert!(
+            err.to_string().contains("MacosAudioMode")
+                || err.to_string().contains("unknown variant"),
+            "unknown mode must fail loudly; got {err}"
+        );
+    }
+
+    #[test]
+    fn macos_audio_mode_off_is_omitted_from_disk() {
+        let mut c = Config::default();
+        let toml = toml::to_string(&c.as_on_disk()).unwrap();
+        assert!(
+            !toml.contains("MacosAudioMode"),
+            "the platform-specific key must stay out of default configs"
+        );
+        c.macos_audio_mode = MacosAudioMode::Exclusive;
+        let toml = toml::to_string(&c.as_on_disk()).unwrap();
+        assert!(toml.contains("MacosAudioMode = \"exclusive\""));
     }
 
     #[test]

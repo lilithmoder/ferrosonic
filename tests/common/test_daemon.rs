@@ -17,7 +17,7 @@ use ferrosonic::daemon::DaemonCore;
 
 use super::fake_mpv::FakeMpv;
 use super::fake_subsonic::FakeSubsonic;
-use super::pw_recorder::RecordingPwRunner;
+use super::pw_recorder::{RecordingPwRunner, UnavailablePwRunner};
 
 pub struct TestDaemon {
     pub core: Arc<DaemonCore>,
@@ -53,6 +53,15 @@ impl TestDaemon {
         let config_dir = super::tempdir();
         let td = Self::build(config_dir, false, pipewire, "0.41.0").await;
         (td, recorder)
+    }
+
+    /// Build a daemon whose `PipeWire` controller is permanently
+    /// unavailable (the probe fails), mirroring a host without
+    /// `pw-metadata` such as macOS.
+    pub async fn new_with_unavailable_pw() -> Self {
+        let pipewire = PipeWireController::with_runner(Arc::new(UnavailablePwRunner));
+        let config_dir = super::tempdir();
+        Self::build(config_dir, false, pipewire, "0.41.0").await
     }
 
     async fn build(

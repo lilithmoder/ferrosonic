@@ -44,6 +44,23 @@ impl RecordingPwRunner {
     }
 }
 
+/// Runner whose probe and every command fail, so the controller is
+/// constructed unavailable. Mirrors a host without `pw-metadata` (macOS)
+/// where rate switching must be a silent no-op.
+#[derive(Clone, Default)]
+pub struct UnavailablePwRunner;
+
+#[async_trait]
+impl CommandRunner for UnavailablePwRunner {
+    async fn run(&self, _args: &[&str]) -> Result<Output, AudioError> {
+        Err(AudioError::PipeWire("pw-metadata unavailable".into()))
+    }
+
+    fn run_blocking(&self, _args: &[&str]) -> Result<Output, AudioError> {
+        Err(AudioError::PipeWire("pw-metadata unavailable".into()))
+    }
+}
+
 #[async_trait]
 impl CommandRunner for RecordingPwRunner {
     async fn run(&self, args: &[&str]) -> Result<Output, AudioError> {

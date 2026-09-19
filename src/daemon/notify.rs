@@ -16,6 +16,42 @@ pub fn track_body(song: &Child) -> String {
     }
 }
 
+/// Test/headless guard: never touch the notification backend when set. The
+/// test harness sets this (tests/common) so the suite cannot spam the desktop;
+/// it must apply to every backend, not just the Linux D-Bus one.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn desktop_notify_suppressed() -> bool {
+    std::env::var_os("FERROSONIC_NO_DESKTOP_NOTIFY").is_some()
+}
+
+/// Write `bytes` into the notifier's reusable cover tempfile, returning its
+/// path. The slot lock intentionally spans the `spawn_blocking` write so
+/// concurrent cover writes to the shared path serialize; do not tighten.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[allow(clippy::significant_drop_tightening)]
+async fn write_cover_tempfile(
+    slot: &tokio::sync::Mutex<Option<tempfile::NamedTempFile>>,
+    bytes: &[u8],
+) -> Option<std::path::PathBuf> {
+    let mut guard = slot.lock().await;
+    if guard.is_none() {
+        *guard = tempfile::Builder::new()
+            .prefix("ferrosonic-notify-")
+            .suffix(".img")
+            .tempfile()
+            .ok();
+    }
+    let path = guard.as_ref()?.path().to_path_buf();
+    // Atomic write off the async worker (atomic_write_bytes fsyncs).
+    let dest = path.clone();
+    let owned = bytes.to_vec();
+    tokio::task::spawn_blocking(move || crate::io_util::atomic_write_bytes(&dest, &owned))
+        .await
+        .ok()?
+        .ok()?;
+    Some(path)
+}
+
 #[cfg(target_os = "linux")]
 pub use linux::Notifier;
 #[cfg(target_os = "macos")]
@@ -101,9 +137,7 @@ mod linux {
         }
 
         async fn proxy(&self) -> Option<NotificationsProxy<'_>> {
-            // Test/headless guard: never touch the real session bus when set. The
-            // test harness sets it (tests/common) so the suite cannot spam the desktop.
-            if std::env::var_os("FERROSONIC_NO_DESKTOP_NOTIFY").is_some() {
+            if super::desktop_notify_suppressed() {
                 return None;
             }
             let conn = self
@@ -114,27 +148,8 @@ mod linux {
             NotificationsProxy::new(conn).await.ok()
         }
 
-        // cover_file lock intentionally spans the spawn_blocking write so concurrent
-        // cover writes to the shared tempfile path serialize; do not tighten.
-        #[allow(clippy::significant_drop_tightening)]
         async fn cover_uri(&self, bytes: &[u8]) -> Option<String> {
-            let mut guard = self.cover_file.lock().await;
-            if guard.is_none() {
-                *guard = tempfile::Builder::new()
-                    .prefix("ferrosonic-notify-")
-                    .suffix(".img")
-                    .tempfile()
-                    .ok();
-            }
-            let path = guard.as_ref()?.path().to_path_buf();
-            // Atomic write off the async worker (atomic_write_bytes fsyncs);
-            // the lock spans the await so concurrent writes to the path serialize.
-            let dest = path.clone();
-            let owned = bytes.to_vec();
-            tokio::task::spawn_blocking(move || crate::io_util::atomic_write_bytes(&dest, &owned))
-                .await
-                .ok()?
-                .ok()?;
+            let path = super::write_cover_tempfile(&self.cover_file, bytes).await?;
             Some(format!("file://{}", path.display()))
         }
 
@@ -183,21 +198,56 @@ fn osascript_notification_command(title: &str, body: &str) -> tokio::process::Co
     cmd
 }
 
+/// Build the `terminal-notifier` invocation for `title`/`body`, optionally
+/// attaching `cover_path` as the notification image.
+///
+/// Compiled under `test` as well so the argv construction is covered on any
+/// host; only macOS actually runs it.
+#[cfg(any(target_os = "macos", test))]
+fn terminal_notifier_command(
+    binary: &std::path::Path,
+    title: &str,
+    body: &str,
+    cover_path: Option<&std::path::Path>,
+) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(binary);
+    cmd.arg("-title")
+        .arg(title)
+        .arg("-message")
+        .arg(body)
+        // One group id so each track replaces the previous banner instead of
+        // stacking a new one.
+        .arg("-group")
+        .arg("ferrosonic");
+    if let Some(path) = cover_path {
+        cmd.arg("-contentImage").arg(path);
+    }
+    cmd
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::path::PathBuf;
     use std::sync::Mutex as StdMutex;
 
-    use tracing::debug;
+    use tempfile::NamedTempFile;
+    use tokio::sync::Mutex;
+    use tracing::warn;
 
-    /// Track-change notifications on macOS via `osascript`.
+    /// Track-change notifications on macOS.
     ///
     /// macOS ships no freedesktop notification daemon, so the Linux D-Bus path
-    /// does not apply. `AppleScript`'s `display notification` is the built-in
-    /// equivalent and needs no extra dependency. Cover art is not attached —
-    /// `display notification` has no image parameter — so only the title and
-    /// the artist/album body are shown.
+    /// does not apply. Homebrew's `terminal-notifier` is preferred when
+    /// installed: it is a bundled app posting through `UserNotifications`, so
+    /// it works where `osascript` is unreliable, replaces the previous banner
+    /// (`-group`), and can attach cover art (`-contentImage`). Without it, the
+    /// built-in `AppleScript` `display notification` fallback is used, which is
+    /// text-only.
     pub struct Notifier {
         last_song: StdMutex<Option<String>>,
+        /// Absolute path of `terminal-notifier` when found on PATH.
+        terminal_notifier: Option<PathBuf>,
+        cover_file: Mutex<Option<NamedTempFile>>,
     }
 
     impl Default for Notifier {
@@ -207,11 +257,14 @@ mod macos {
     }
 
     impl Notifier {
-        /// Construct an idle notifier; nothing runs until the first change.
+        /// Construct an idle notifier, probing PATH once for
+        /// `terminal-notifier`; nothing else runs until the first change.
         #[must_use]
         pub fn new() -> Self {
             Self {
                 last_song: StdMutex::new(None),
+                terminal_notifier: find_terminal_notifier(),
+                cover_file: Mutex::new(None),
             }
         }
 
@@ -230,34 +283,87 @@ mod macos {
             }
         }
 
-        /// Show a track-change notification. Text is passed as `argv` and read
-        /// back inside `on run argv`, so no `AppleScript` string escaping is
-        /// needed and an arbitrary title/body cannot alter the script. A failed
-        /// `osascript` (notifications disabled, no GUI session) is logged and
-        /// ignored, matching the Linux notifier's best-effort behaviour.
-        // `&self` is unused here but kept for API parity with the Linux notifier.
-        #[allow(clippy::unused_self)]
-        pub async fn show(&self, title: &str, body: &str, _cover: Option<&[u8]>) {
+        async fn cover_path(&self, bytes: &[u8]) -> Option<PathBuf> {
+            super::write_cover_tempfile(&self.cover_file, bytes).await
+        }
+
+        /// Show a track-change notification, preferring `terminal-notifier`
+        /// when installed and falling back to `osascript`. Text is passed as
+        /// separate argv entries in both paths, so no escaping is needed and an
+        /// arbitrary title/body cannot alter a script. Failures are logged at
+        /// `warn` (not `debug`) because a missing banner is otherwise invisible.
+        pub async fn show(&self, title: &str, body: &str, cover: Option<&[u8]>) {
+            if super::desktop_notify_suppressed() {
+                return;
+            }
+            if let Some(binary) = self.terminal_notifier.as_deref() {
+                let cover_path = match cover {
+                    Some(bytes) => self.cover_path(bytes).await,
+                    None => None,
+                };
+                let mut cmd =
+                    super::terminal_notifier_command(binary, title, body, cover_path.as_deref());
+                match cmd.output().await {
+                    Ok(out) if out.status.success() => return,
+                    Ok(out) => warn!(
+                        "desktop notify failed (terminal-notifier {}): {}; falling back to osascript",
+                        out.status,
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ),
+                    Err(e) => warn!(
+                        "desktop notify failed (terminal-notifier spawn): {e}; \
+                         falling back to osascript"
+                    ),
+                }
+            }
             match super::osascript_notification_command(title, body)
                 .output()
                 .await
             {
                 Ok(out) if out.status.success() => {}
-                Ok(out) => debug!(
+                Ok(out) => warn!(
                     "desktop notify failed (osascript {}): {}",
                     out.status,
                     String::from_utf8_lossy(&out.stderr).trim()
                 ),
-                Err(e) => debug!("desktop notify failed (osascript spawn): {e}"),
+                Err(e) => warn!("desktop notify failed (osascript spawn): {e}"),
             }
+        }
+    }
+
+    /// Absolute path of `terminal-notifier` on PATH, if installed.
+    fn find_terminal_notifier() -> Option<PathBuf> {
+        let out = std::process::Command::new("which")
+            .arg("terminal-notifier")
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if path.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(path))
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{osascript_notification_command, track_body};
+    use super::{
+        desktop_notify_suppressed, osascript_notification_command, terminal_notifier_command,
+        track_body,
+    };
     use crate::subsonic::models::Child;
+
+    fn argv(cmd: &tokio::process::Command) -> Vec<String> {
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
 
     fn song(artist: Option<&str>, album: Option<&str>) -> Child {
         Child {
@@ -288,6 +394,54 @@ mod tests {
         assert_eq!(
             track_body(&song(None, Some("Geogaddi"))),
             "Unknown Artist\nGeogaddi"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn suppression_guard_reads_env_var() {
+        std::env::set_var("FERROSONIC_NO_DESKTOP_NOTIFY", "1");
+        assert!(desktop_notify_suppressed());
+        std::env::remove_var("FERROSONIC_NO_DESKTOP_NOTIFY");
+        assert!(!desktop_notify_suppressed());
+    }
+
+    #[test]
+    fn terminal_notifier_command_passes_text_and_cover_as_args() {
+        let cmd = terminal_notifier_command(
+            std::path::Path::new("/opt/homebrew/bin/terminal-notifier"),
+            "Title \"quoted\"",
+            "Artist\nAlbum",
+            Some(std::path::Path::new("/tmp/ferrosonic-cover.img")),
+        );
+        assert_eq!(
+            argv(&cmd),
+            vec![
+                "-title",
+                "Title \"quoted\"",
+                "-message",
+                "Artist\nAlbum",
+                "-group",
+                "ferrosonic",
+                "-contentImage",
+                "/tmp/ferrosonic-cover.img",
+            ]
+        );
+        assert_eq!(
+            cmd.as_std().get_program().to_string_lossy(),
+            "/opt/homebrew/bin/terminal-notifier"
+        );
+    }
+
+    #[test]
+    fn terminal_notifier_command_omits_cover_when_absent() {
+        let cmd =
+            terminal_notifier_command(std::path::Path::new("terminal-notifier"), "T", "B", None);
+        let args = argv(&cmd);
+        assert!(!args.iter().any(|a| a == "-contentImage"));
+        assert_eq!(
+            args,
+            vec!["-title", "T", "-message", "B", "-group", "ferrosonic"]
         );
     }
 

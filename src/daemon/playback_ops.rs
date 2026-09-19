@@ -117,7 +117,9 @@ impl DaemonCore {
             if let Some(rate) = known_rate {
                 let switched = {
                     let mut pw = self.pipewire.lock().await;
-                    if pw.get_current_rate() == Some(rate) {
+                    // An unavailable controller (e.g. macOS) never re-clocks,
+                    // so there is no switch to settle for.
+                    if !pw.is_available() || pw.get_current_rate() == Some(rate) {
                         false
                     } else {
                         if let Err(e) = pw.set_rate(rate).await {

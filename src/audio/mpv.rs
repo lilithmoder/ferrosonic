@@ -1,7 +1,7 @@
 //! mpv process ownership and JSON IPC control.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -17,6 +17,8 @@ use tokio::time::{sleep, timeout};
 use tracing::{debug, info, trace, warn};
 
 use crate::config::paths::mpv_socket_path;
+#[cfg(target_os = "macos")]
+use crate::config::MacosAudioMode;
 use crate::config::ReplayGainMode;
 use crate::error::AudioError;
 use crate::proc_util::set_die_with_parent;
@@ -90,6 +92,10 @@ pub struct MpvController {
     replaygain_preamp: f64,
     /// Our "prevent clipping" sense (`true` = prevent); see [`mpv_allow_clip`].
     replaygain_clip: bool,
+    /// macOS `CoreAudio` output mode applied as a `start()` CLI arg; see
+    /// [`MacosAudioMode`]. Unused on other platforms.
+    #[cfg(target_os = "macos")]
+    macos_audio_mode: MacosAudioMode,
 }
 
 /// mpv's `--replaygain-clip` / `replaygain-clip` means "allow clip" (`true`
@@ -112,6 +118,43 @@ fn parse_mpv_version(raw: &str) -> Option<(u16, u16)> {
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     Some((major, minor))
+}
+
+/// Ask a previous daemon's still-running mpv to quit before we unlink its
+/// socket and spawn our own.
+///
+/// macOS has no `PR_SET_PDEATHSIG`, so a daemon that dies abnormally can
+/// leave mpv running and holding the audio device. Connecting to the stale
+/// IPC socket and sending `quit` is the clean way to reclaim it. A socket
+/// file with no listener (the usual crash case) refuses the connection and
+/// this returns immediately.
+async fn reap_stale_mpv_at(socket_path: &Path) {
+    let Ok(stream) = UnixStream::connect(socket_path).await else {
+        return;
+    };
+    let (read_half, mut write_half) = stream.into_split();
+    let Ok(mut payload) = serde_json::to_vec(&json!({"command": ["quit"]})) else {
+        return;
+    };
+    payload.push(b'\n');
+    if write_half.write_all(&payload).await.is_err() {
+        return;
+    }
+    // Wait for mpv to close the connection (quit processed) so the audio
+    // device is released before our own mpv starts; bounded so a wedged
+    // process cannot delay startup.
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+    let _ = timeout(Duration::from_secs(1), async {
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await;
 }
 
 impl MpvController {
@@ -144,6 +187,8 @@ impl MpvController {
             replaygain_mode: ReplayGainMode::Off,
             replaygain_preamp: 0.0,
             replaygain_clip: false,
+            #[cfg(target_os = "macos")]
+            macos_audio_mode: MacosAudioMode::Off,
         }
     }
 
@@ -170,6 +215,14 @@ impl MpvController {
             warn!("Ignoring non-finite ReplayGain preamp; retaining the last valid value");
         }
         self.replaygain_clip = clip;
+    }
+
+    /// Set the macOS CoreAudio output mode used by the next `start()`, without
+    /// touching a live mpv. AO selection is not reliably runtime-changeable,
+    /// so a running mpv picks the mode up on its next (re)start.
+    #[cfg(target_os = "macos")]
+    pub fn set_macos_audio_mode_startup(&mut self, mode: MacosAudioMode) {
+        self.macos_audio_mode = mode;
     }
 
     /// `(major, minor)` of the connected mpv, or `None` if not yet probed.
@@ -253,6 +306,12 @@ impl MpvController {
         if need_respawn {
             self.tear_down_connection().await;
         }
+        // With no live child of ours, any socket file here belongs to a
+        // previous daemon's mpv (macOS has no PR_SET_PDEATHSIG, so it can
+        // outlive a crash). Reclaim the audio device before unlinking it.
+        if self.process.is_none() {
+            reap_stale_mpv_at(&self.socket_path).await;
+        }
         let _ = std::fs::remove_file(&self.socket_path);
         info!("Starting MPV with socket: {}", self.socket_path.display());
 
@@ -284,8 +343,14 @@ impl MpvController {
                 } else {
                     "no"
                 }
-            ))
-            .arg(format!("--input-ipc-server={}", self.socket_path.display()))
+            ));
+        // macOS bit-perfect output mode; see `MacosAudioMode`. Added only
+        // when configured so shared output stays mpv's default.
+        #[cfg(target_os = "macos")]
+        if let Some(arg) = self.macos_audio_mode.mpv_arg() {
+            cmd.arg(arg);
+        }
+        cmd.arg(format!("--input-ipc-server={}", self.socket_path.display()))
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         set_die_with_parent(&mut cmd);
@@ -1066,6 +1131,46 @@ mod lifecycle_tests {
             pid_is_gone(pid),
             "a live child must be killed and reaped, not left running or zombie"
         );
+    }
+
+    #[tokio::test]
+    async fn reap_stale_mpv_sends_quit_to_a_live_socket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mpv.sock");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind fake mpv socket");
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.is_ok() {
+                let _ = tx.send(line);
+            }
+            // Dropping `stream` closes the connection so the reaper's
+            // read-until-EOF wait finishes promptly.
+        });
+
+        reap_stale_mpv_at(&path).await;
+
+        let line = rx.await.expect("fake mpv saw a command");
+        assert!(
+            line.contains("\"quit\""),
+            "expected a quit command; got {line}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_stale_mpv_ignores_a_socket_with_no_listener() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("mpv.sock");
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind fake mpv socket");
+        drop(listener);
+        // Must return promptly instead of waiting out the EOF timeout.
+        let start = std::time::Instant::now();
+        reap_stale_mpv_at(&path).await;
+        assert!(start.elapsed() < Duration::from_millis(500));
     }
 
     #[test]

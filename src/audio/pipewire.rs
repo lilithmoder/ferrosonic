@@ -113,6 +113,15 @@ impl PipeWireController {
         Ok(parse_force_rate_from_output(&stdout))
     }
 
+    /// Whether `pw-metadata` could be executed during construction. When
+    /// false, [`set_rate`](Self::set_rate) and
+    /// [`clear_forced_rate`](Self::clear_forced_rate) are silent no-ops and no
+    /// rate change ever happens, so callers must not wait out a settle delay.
+    #[must_use]
+    pub const fn is_available(&self) -> bool {
+        self.available
+    }
+
     /// Rate this controller last set, if any.
     #[must_use]
     pub const fn get_current_rate(&self) -> Option<u32> {

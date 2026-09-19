@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Ferrosonic daemon LaunchAgent (macOS counterpart of ferrosonicd.service).
+
+  Install (adjust the ProgramArguments path if ferrosonic is not at
+  /usr/local/bin/ferrosonic; a Homebrew or ~/.local/bin install needs the
+  matching path):
+
+    cp contrib/ferrosonicd.plist ~/Library/LaunchAgents/com.ferrosonic.daemon.plist
+    launchctl bootstrap gui/"$(id -u)" ~/Library/LaunchAgents/com.ferrosonic.daemon.plist
+
+  Remove:
+
+    launchctl bootout gui/"$(id -u)"/com.ferrosonic.daemon
+
+  SuccessfulExit=false mirrors the systemd unit's Restart=on-failure: the
+  daemon's idle-exit monitor may end a quiet session cleanly, and the TUI
+  respawns it on demand, so only crashes should be restarted here.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ferrosonic.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/ferrosonic</string>
+        <string>--daemon</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+</dict>
+</plist>

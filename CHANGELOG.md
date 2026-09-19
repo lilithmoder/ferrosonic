@@ -4,6 +4,25 @@
 
 ### Fixed
 
+- **Stale mpv after a daemon crash.** When the daemon starts with no mpv of
+  its own and finds a live IPC socket, it now asks that mpv to quit before
+  spawning its own, so a daemon that died abnormally (macOS has no
+  `PR_SET_PDEATHSIG`) cannot leave an orphan holding the audio device.
+- **macOS notifications.** The macOS notifier now prefers Homebrew's
+  `terminal-notifier` when it is on PATH: it posts through Apple's
+  `UserNotifications` framework, replaces the previous track's banner
+  (`-group`), and attaches cover art (`-contentImage`). The `osascript`
+  fallback stays for machines without it, and notification failures now log at
+  `warn` level so a missing banner is visible in `ferrosonicd.log`.
+- **macOS rate-settle stall.** Without `pw-metadata` (macOS) no sample-rate
+  change can happen, but the daemon still treated every track load and resume
+  as a switch and held playback for `RateSwitchDelayMs` (default 500 ms). The
+  settle pause is now skipped whenever the `PipeWire` controller is unavailable.
+- **macOS notification test guard.** `FERROSONIC_NO_DESKTOP_NOTIFY` now
+  suppresses the macOS `osascript` backend as well, so integration tests on a
+  Mac cannot post real notifications.
+- **nix-darwin chafa discovery.** The Nix store probe now also finds
+  `libchafa.dylib`, not just `libchafa.so.0`, so cover art works on nix-darwin.
 - **Configuration transactions.** Concurrent settings, server, and music-folder
   updates now serialize persistence with the matching live/client commit;
   malformed server URLs are rejected before credential or disk side effects.
@@ -80,6 +99,10 @@
 
 ### Changed
 
+- **macOS runtime status documented.** README and `docs/MACOS-PORT.md` now
+  record the hardware results (playback, daemon, and Keychain working;
+  `osascript` notifications not appearing on Sequoia) and note that the
+  rate-switch settle pause never delays playback on macOS.
 - **macOS documentation accuracy.** The README macOS section now describes
   the fork's CI artifact workflow and the `release-fast` local build instead
   of claiming no prebuilt binary exists; `docs/MACOS-PORT.md` status reflects
@@ -116,6 +139,20 @@
 
 ### Added
 
+- **Apple Silicon macOS artifact and macOS lib tests.** `macos-release` now
+  builds `aarch64-apple-darwin` alongside `x86_64-apple-darwin` and runs
+  `cargo test --lib` on an Apple Silicon runner, so the macOS `cfg` code is
+  executed in CI, not just type-checked.
+- **macOS launchd agent.** `contrib/ferrosonicd.plist` is the LaunchAgent
+  counterpart of the systemd unit, with README install instructions.
+- **macOS bit-perfect output mode.** New `MacosAudioMode` config key
+  (`"off"`, `"physical-format"`, or `"exclusive"`) passes the matching mpv
+  CoreAudio option at spawn: `physical-format` makes the device follow each
+  track's sample rate (the closest analog to PipeWire's `clock.force-rate`),
+  while `exclusive` uses hog mode with no system mixing. Defaults to `off`
+  and is ignored on Linux, where PipeWire always handles rate matching. The
+  mode applies when the daemon (re)starts mpv; it is config-file only for
+  now.
 - **macOS and Linux release artifact workflows.** Manual/push-triggered
   `macos-release` and `linux-release` GitHub Actions workflows build
   downloadable `x86_64-apple-darwin` and `x86_64-unknown-linux-gnu` binaries

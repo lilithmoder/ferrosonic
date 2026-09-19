@@ -15,7 +15,7 @@ pub mod test_daemon;
 pub use fake_mpv::FakeMpv;
 pub use fake_subsonic::FakeSubsonic;
 pub use fixtures::{song, song_starred, songs};
-pub use pw_recorder::RecordingPwRunner;
+pub use pw_recorder::{RecordingPwRunner, UnavailablePwRunner};
 pub use recording_client::RecordingClient;
 pub use render::{render, render_styled, StyledScreen};
 pub use test_daemon::TestDaemon;

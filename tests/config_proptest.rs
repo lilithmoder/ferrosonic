@@ -1,6 +1,6 @@
 //! Random Config + RepeatMode values round-trip through TOML and JSON.
 
-use ferrosonic::config::{Config, RepeatMode, ReplayGainMode};
+use ferrosonic::config::{Config, MacosAudioMode, RepeatMode, ReplayGainMode};
 use proptest::prelude::*;
 
 fn arb_repeat_mode() -> impl Strategy<Value = RepeatMode> {
@@ -16,6 +16,14 @@ fn arb_replay_gain_mode() -> impl Strategy<Value = ReplayGainMode> {
         Just(ReplayGainMode::Off),
         Just(ReplayGainMode::Track),
         Just(ReplayGainMode::Album),
+    ]
+}
+
+fn arb_macos_audio_mode() -> impl Strategy<Value = MacosAudioMode> {
+    prop_oneof![
+        Just(MacosAudioMode::Off),
+        Just(MacosAudioMode::PhysicalFormat),
+        Just(MacosAudioMode::Exclusive),
     ]
 }
 
@@ -42,6 +50,7 @@ fn arb_config() -> impl Strategy<Value = Config> {
             -15.0f64..=15.0f64,
             any::<bool>(),
             any::<bool>(),
+            arb_macos_audio_mode(),
         ),
     )
         .prop_map(
@@ -67,6 +76,7 @@ fn arb_config() -> impl Strategy<Value = Config> {
                     replay_gain_preamp,
                     replay_gain_clip,
                     stream_on_start,
+                    macos_audio_mode,
                 ),
             )| Config {
                 base_url,
@@ -96,6 +106,7 @@ fn arb_config() -> impl Strategy<Value = Config> {
                 scrobble,
                 notifications,
                 rate_switch_delay_ms,
+                macos_audio_mode,
                 music_folder_id,
                 music_folder_chosen,
                 replay_gain_mode,
@@ -134,6 +145,7 @@ fn config_round_trips_through_toml() {
             prop_assert_eq!(parsed.scrobble, c.scrobble);
             prop_assert_eq!(parsed.notifications, c.notifications);
             prop_assert_eq!(parsed.rate_switch_delay_ms, c.rate_switch_delay_ms);
+            prop_assert_eq!(parsed.macos_audio_mode, c.macos_audio_mode);
             prop_assert_eq!(parsed.replay_gain_mode, c.replay_gain_mode);
             prop_assert_eq!(parsed.replay_gain_preamp, c.replay_gain_preamp);
             prop_assert_eq!(parsed.replay_gain_clip, c.replay_gain_clip);
